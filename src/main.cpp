@@ -1,23 +1,35 @@
-#include <StateMachine.hpp>
-#include <MainGameState.hpp>
+extern "C" {
+    #include <raylib.h>
+}
+
+#include "StateMachine.hpp"
+#include "MainGameState.hpp"
 #include <memory>
-#include <chrono>
 
-int main()
-{ 
-    float delta_time = 0.0f;
+int main() {
+    const int W = 288;
+    const int H = 512;
 
-    StateMachine state_machine = StateMachine();
-    state_machine.add_state(std::make_unique<MainGameState>(), false);
-    state_machine.handle_state_changes(delta_time);
+    InitWindow(W, H, "Flappy Bird DCA");
+    SetTargetFPS(60);
 
-    while (!state_machine.is_game_ending())
-    {
-        state_machine.handle_state_changes(delta_time);
-        state_machine.getCurrentState()->handleInput();
-        state_machine.getCurrentState()->update(delta_time);
-        state_machine.getCurrentState()->render();       
+    StateMachine sm;
+    sm.add_state(std::make_unique<MainGameState>(&sm), false);
+
+    while (!sm.is_game_ending() && !WindowShouldClose()) {
+        float dt = GetFrameTime();
+
+        sm.handle_state_changes(dt);
+
+        auto* st = sm.getCurrentState().get();
+        if (st) {
+            st->handleInput();
+            st->update(dt);
+            st->render();
+        }
     }
 
+    CloseWindow();
     return 0;
 }
+
