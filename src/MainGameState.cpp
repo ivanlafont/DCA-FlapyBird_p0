@@ -1,4 +1,3 @@
-// src/MainGameState.cpp
 extern "C" {
     #include <raylib.h>
 }
@@ -8,117 +7,131 @@ extern "C" {
 #include <memory>
 #include <string>
 
-// helper para destino
-static Rectangle make_dest(float x, float y, float w, float h) {
-    return Rectangle{ x, y, w, h };
+MainGameState::MainGameState(StateMachine* sm) : sm_(sm) {}
+
+MainGameState::~MainGameState() {
+    // Libera TODO lo cargado
+    for (auto& t : texBg_) if (t.id) UnloadTexture(t);
+    if (texGround_.id) UnloadTexture(texGround_);
+    for (int c=0;c<3;c++) for (int f=0;f<3;f++) if (birdFrames_[c][f].id) UnloadTexture(birdFrames_[c][f]);
+    for (auto& t : texDigits_) if (t.id) UnloadTexture(t);
+    if (pipeGreen_.id) UnloadTexture(pipeGreen_);
+    if (pipeRed_.id)   UnloadTexture(pipeRed_);
+    if (birdSprite.id) UnloadTexture(birdSprite);   // por si quedó copiado
+    if (pipeSprite.id) UnloadTexture(pipeSprite);   // idem
 }
 
-MainGameState::MainGameState(StateMachine* sm) : sm_(sm) {
-    bird_.x = 200.0f;
-    bird_.y = 200.0f;
+void MainGameState::init() {
     SetRandomSeed(GetTime());
 
-    // --- fondos ---
-    texBg_[0] = LoadTexture("assets/background-day.png");
-    texBg_[1] = LoadTexture("assets/background-night.png");
+    // --- Fondos y suelo (usar day/night y base.png)
+    texBg_[0]    = LoadTexture("assets/background-day.png");
+    texBg_[1]    = LoadTexture("assets/background-night.png");
+    bgIdx_       = GetRandomValue(0,1);
+    texGround_   = LoadTexture("assets/base.png");
 
-    // --- suelo ---
-    texGround_ = LoadTexture("assets/base.png");
+    // --- Dígitos 0..9
+    for (int i=0;i<10;i++) {
+        texDigits_[i] = LoadTexture(std::string("assets/" + std::to_string(i) + ".png").c_str());
+    }
 
-    // --- pájaros (red/blue/yellow × down/mid/up) ---
+    // --- Pájaros: 3 colores × 3 frames
     const char* colors[3] = {"red","blue","yellow"};
     const char* flaps[3]  = {"downflap","midflap","upflap"};
-    for (int c=0; c<3; c++) {
-        for (int f=0; f<3; f++) {
-            std::string path = "assets/" + std::string(colors[c]) + "bird-" + flaps[f] + ".png";
-            texBirds_[c][f] = LoadTexture(path.c_str());
+    for (int c=0;c<3;c++) {
+        for (int f=0;f<3;f++) {
+            std::string path = std::string("assets/") + colors[c] + "bird-" + flaps[f] + ".png";
+            birdFrames_[c][f] = LoadTexture(path.c_str());
         }
     }
     birdColor_ = GetRandomValue(0,2);
+    birdFrame_ = 1; // mid
+    birdAnimTimer_ = 0.0f;
 
-    // --- tuberías ---
-    texPipes_[0] = LoadTexture("assets/pipe-green.png");
-    texPipes_[1] = LoadTexture("assets/pipe-red.png");
-    pipeColor_ = GetRandomValue(0,1);
+    // La práctica pide birdSprite: usamos el frame actual para cumplir requisito
+    birdSprite = birdFrames_[birdColor_][birdFrame_];
 
-    // --- dígitos ---
-    for (int i=0; i<10; i++) {
-        std::string path = "assets/" + std::to_string(i) + ".png";
-        texDigits_[i] = LoadTexture(path.c_str());
-    }
+    // Fijar tamaño del jugador por sprite
+    bird_.width  = birdSprite.width;
+    bird_.height = birdSprite.height;
 
-    // --- pantalla “get ready” (opcional) ---
-    texMessage_ = LoadTexture("assets/message.png");
-}
+    // Posición inicial un poco hacia la derecha y centrada vertical
+    bird_.x = 128.0f;
+    bird_.y = GetScreenHeight()*0.42f;
 
-MainGameState::~MainGameState() {
-    for (auto& t : texBg_) if (t.id) UnloadTexture(t);
-    if (texGround_.id) UnloadTexture(texGround_);
-    for (int c=0; c<3; c++) for (int f=0; f<3; f++) if (texBirds_[c][f].id) UnloadTexture(texBirds_[c][f]);
-    for (auto& t : texPipes_) if (t.id) UnloadTexture(t);
-    for (auto& t : texDigits_) if (t.id) UnloadTexture(t);
-    if (texMessage_.id) UnloadTexture(texMessage_);
+    // --- Tuberías: dos colores y parámetros dimensiones
+    pipeGreen_ = LoadTexture("assets/pipe-green.png");
+    pipeRed_   = LoadTexture("assets/pipe-red.png");
+
+    // La práctica pide pipeSprite (variable del estado). Le damos uno por defecto.
+    pipeSprite = pipeGreen_;
+
+    PIPE_W = (float)pipeGreen_.width;   // ambos pipes suelen tener mismo tamaño
+    PIPE_H = (float)pipeGreen_.height;
+
+    GAP = bird_.height * 4.5f;
 }
 
 void MainGameState::handleInput() {
     if (IsKeyPressed(KEY_SPACE)) bird_.vy += JUMP_;
-    if (IsKeyPressed(KEY_F1)) debugBoxes_ = !debugBoxes_;
+    if (IsKeyPressed(KEY_F1))    debugBoxes_ = !debugBoxes_;
 }
 
 void MainGameState::update(float dt) {
-    // --- física ---
+    // Física del pájaro (según enunciado)
     bird_.vy += GRAVITY_ * dt;
     bird_.y  += bird_.vy * dt;
     bird_.vy  = 0.0f;
 
-    // límites pantalla -> game over
-    if (bird_.y - bird_.r < 0 || bird_.y + bird_.r > GetScreenHeight()) {
-        sm_->add_state(std::make_unique<GameOverState>(sm_, score_), true);
-        return;
-    }
-
-    // --- animación bird ---
+    // Aleteo: actualiza frame y birdSprite (cumplimos requisito de propiedad)
     birdAnimTimer_ += dt;
     if (birdAnimTimer_ >= 0.15f) {
         birdAnimTimer_ = 0.0f;
         birdFrame_ = (birdFrame_ + 1) % 3;
+        birdSprite = birdFrames_[birdColor_][birdFrame_];
+        // (tamaño se mantiene; si cambiaran, podrías re-actualizar width/height aquí)
     }
 
-    // --- scroll fondo/suelo ---
-    bgX_     -= BG_SPEED_ * dt;
-    groundX_ -= GROUND_SPEED_ * dt;
-    if (bgX_ <= -texBg_[0].width) bgX_ = 0.0f;
-    if (groundX_ <= -texGround_.width) groundX_ = 0.0f;
+    // Salida de pantalla → Game Over
+    if (bird_.y < 0 || bird_.y + bird_.height > GetScreenHeight() - (texGround_.id ? texGround_.height : 0)) {
+        sm_->add_state(std::make_unique<GameOverState>(sm_, score_), true);
+        return;
+    }
 
-    // --- spawner pipes ---
+    // Scroll estético
+    bgX_     -= BG_SPEED_     * dt;
+    groundX_ -= GROUND_SPEED_ * dt;
+    if (bgX_     <= -texBg_[bgIdx_].width)  bgX_ = 0.0f;
+    if (groundX_ <= -texGround_.width)      groundX_ = 0.0f;
+
+    // Spawner
     spawnTimer_ += dt;
     if (spawnTimer_ >= spawnEvery_) {
         spawnTimer_ = 0.0f;
-        int minOff = PIPE_H_/2;
-        int maxOff = GetScreenHeight()/2;
-        int pipe_y_offset_top = GetRandomValue(minOff, maxOff);
-        float centerY = (PIPE_H_ - pipe_y_offset_top)
-                      + GetRandomValue(PIPE_H_/2, GetScreenHeight()/2);
-        spawnPipe(centerY);
+        spawnPipe();
     }
 
-    // mover pipes
-    for (auto& p : pipes_) {
+    // Mover tuberías
+    for (auto &p : pipes_) {
         p.top.x -= PIPE_SPEED_ * dt;
         p.bot.x -= PIPE_SPEED_ * dt;
     }
-    while (!pipes_.empty() && (pipes_.front().top.x + PIPE_W_ < 0)) {
+
+    // Borrar las que salieron
+    while (!pipes_.empty() && (pipes_.front().top.x + PIPE_W < 0)) {
         pipes_.pop_front();
     }
 
-    // colisiones + score
-    Rectangle birdBB{ bird_.x - bird_.r, bird_.y - bird_.r, bird_.r*2, bird_.r*2 };
-    for (auto& p : pipes_) {
-        if (CheckCollisionRecs(birdBB, p.top) || CheckCollisionRecs(birdBB, p.bot)) {
+    // AABB del jugador (ahora por width/height)
+    Rectangle playerBB{ bird_.x, bird_.y, (float)bird_.width, (float)bird_.height };
+
+    // Colisiones + puntuación
+    for (auto &p : pipes_) {
+        if (CheckCollisionRecs(playerBB, p.top) || CheckCollisionRecs(playerBB, p.bot)) {
             sm_->add_state(std::make_unique<GameOverState>(sm_, score_), true);
             return;
         }
-        if (!p.scored && (p.top.x + PIPE_W_ < bird_.x)) {
+        if (!p.scored && (p.top.x + PIPE_W < bird_.x)) {
             p.scored = true;
             score_++;
         }
@@ -129,51 +142,72 @@ void MainGameState::render() {
     BeginDrawing();
     ClearBackground(RAYWHITE);
 
-    // fondo (usa day/night según birdColor_ para variar)
-    DrawTexture(texBg_[birdColor_%2], (int)bgX_, 0, WHITE);
-    DrawTexture(texBg_[birdColor_%2], (int)bgX_ + texBg_[0].width, 0, WHITE);
+    // Fondo (tileado)
+    DrawTexture(texBg_[bgIdx_], (int)bgX_, 0, WHITE);
+    DrawTexture(texBg_[bgIdx_], (int)bgX_ + texBg_[bgIdx_].width, 0, WHITE);
 
-    // tuberías
-    Texture2D currentPipe = texPipes_[pipeColor_];
-    Rectangle srcPipe = {0, 0, (float)currentPipe.width, (float)currentPipe.height};
+    // Pájaro (lo que pide la práctica: DrawTexture con birdSprite)
+    DrawTexture(birdSprite, (int)bird_.x, (int)bird_.y, WHITE);
+
+    // Tuberías (lo que pide la práctica: DrawTextureEx con 180º en la de arriba)
     for (const auto& p : pipes_) {
-        Rectangle srcTop = {0, (float)currentPipe.height, (float)currentPipe.width, -(float)currentPipe.height};
-        Rectangle dstTop = make_dest(p.top.x, p.top.y, (float)PIPE_W_, (float)PIPE_H_);
-        DrawTexturePro(currentPipe, srcTop, dstTop, Vector2{0,0}, 0.0f, WHITE);
+        const Texture2D& t = p.red ? pipeRed_ : pipeGreen_;
 
-        Rectangle dstBot = make_dest(p.bot.x, p.bot.y, (float)PIPE_W_, (float)PIPE_H_);
-        DrawTexturePro(currentPipe, srcPipe, dstBot, Vector2{0,0}, 0.0f, WHITE);
+        // Superior → rotada 180º, con offset (x+PIPE_W, y+PIPE_H)
+        Vector2 posTop{ p.top.x + PIPE_W, p.top.y + PIPE_H };
+        DrawTextureEx(t, posTop, 180.0f, 1.0f, WHITE);
+
+        // Inferior → normal en (x, y)
+        Vector2 posBot{ p.bot.x, p.bot.y };
+        DrawTextureEx(t, posBot, 0.0f, 1.0f, WHITE);
     }
 
-    // pájaro animado
-    Texture2D currentBird = texBirds_[birdColor_][birdFrame_];
-    Rectangle srcBird = {0, 0, (float)currentBird.width, (float)currentBird.height};
-    float birdW = bird_.r * 2.0f;
-    float birdH = bird_.r * 2.0f;
-    Rectangle dstBird = {bird_.x - birdW/2.0f, bird_.y - birdH/2.0f, birdW, birdH};
-    DrawTexturePro(currentBird, srcBird, dstBird, Vector2{0,0}, 0.0f, WHITE);
-
-    // suelo
+    // Suelo (tileado al fondo)
     int groundY = GetScreenHeight() - texGround_.height;
     DrawTexture(texGround_, (int)groundX_, groundY, WHITE);
     DrawTexture(texGround_, (int)groundX_ + texGround_.width, groundY, WHITE);
 
-    // puntuación con dígitos
+    // Puntuación con sprites 0..9 (centrada arriba)
     std::string s = std::to_string(score_);
-    int x = GetScreenWidth()/2 - (s.size()*texDigits_[0].width)/2;
+    int totalW = 0;
+    for (char ch : s) totalW += texDigits_[ch-'0'].width;
+    int x = GetScreenWidth()/2 - totalW/2;
     for (char ch : s) {
         int d = ch - '0';
-        DrawTexture(texDigits_[d], x, 20, WHITE);
+        DrawTexture(texDigits_[d], x, 12, WHITE);
         x += texDigits_[d].width;
+    }
+
+    // Debug
+    if (debugBoxes_) {
+        DrawRectangleLinesEx(Rectangle{bird_.x,bird_.y,(float)bird_.width,(float)bird_.height}, 2, BLUE);
+        for (const auto& p : pipes_) {
+            DrawRectangleLinesEx(p.top, 2, RED);
+            DrawRectangleLinesEx(p.bot, 2, RED);
+        }
     }
 
     EndDrawing();
 }
 
-void MainGameState::spawnPipe(float gapCenterY) {
+void MainGameState::spawnPipe() {
+    const float screenH = (float)GetScreenHeight();
+    const float groundH = texGround_.id ? (float)texGround_.height : 0.0f;
+
+    // Centro del hueco restringido por márgenes y suelo
+    const float minCenter = GAP_MARGIN_ + GAP * 0.5f;
+    const float maxCenter = screenH - groundH - GAP_MARGIN_ - GAP * 0.5f;
+    float gapCenterY = (float)GetRandomValue((int)minCenter, (int)maxCenter);
+
     float x = (float)GetScreenWidth();
-    Rectangle top{ x, - (float)GetRandomValue(PIPE_H_/2, GetScreenHeight()/2), (float)PIPE_W_, (float)PIPE_H_ };
-    Rectangle bot{ x, gapCenterY + GAP_/2.0f, (float)PIPE_W_, (float)PIPE_H_ };
-    pipes_.push_back(PipePair{ top, bot, false });
+    float topY = gapCenterY - GAP * 0.5f - PIPE_H;
+    float botY = gapCenterY + GAP * 0.5f;
+
+    PipePair pp;
+    pp.top = Rectangle{ x, topY, PIPE_W, PIPE_H };
+    pp.bot = Rectangle{ x, botY, PIPE_W, PIPE_H };
+    pp.red = GetRandomValue(0,1) == 1; // usa pipe rojo o verde
+
+    pipes_.push_back(pp);
 }
 
